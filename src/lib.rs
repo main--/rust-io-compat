@@ -75,14 +75,15 @@ pub struct Error {
     kind: ErrorKind,
     #[cfg(feature = "alloc")]
     #[allow(dead_code)]
-    message: String,
+    message: alloc::string::String,
 }
 impl Error {
+    #[allow(unused_variables)]
     pub fn new(kind: ErrorKind, x: impl core::fmt::Debug) -> Self {
         Self {
             kind,
             #[cfg(feature = "alloc")]
-            message: format!("{x:?}"),
+            message: alloc::format!("{x:?}"),
         }
     }
     pub fn kind(&self) -> ErrorKind {
@@ -102,7 +103,8 @@ pub trait Inner {
 trait BridgeRead {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+    #[cfg(feature = "alloc")]
+    fn read_to_end(&mut self, buf: &mut alloc::vec::Vec<u8>) -> Result<usize> {
         let mut b = [0u8; 4096];
         let mut read = 0;
         loop {
@@ -117,8 +119,9 @@ trait BridgeRead {
         Ok(read)
     }
 
-    fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
-        let mut vec = core::mem::replace(buf, String::new()).into_bytes();
+    #[cfg(feature = "alloc")]
+    fn read_to_string(&mut self, buf: &mut alloc::string::String) -> Result<usize> {
+        let mut vec = core::mem::replace(buf, alloc::string::String::new()).into_bytes();
         let prev_len = vec.len();
         let read = self.read_to_end(&mut vec)?;
         match alloc::string::String::from_utf8(vec) {
@@ -197,7 +200,8 @@ macro_rules! impl_seek {
 macro_rules! read_to_end {
     (fatfs, $dir:ident) => {};
     ($mod: ident, $dir: ident) => {
-        fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        #[cfg(feature = "alloc")]
+        fn read_to_end(&mut self, buf: &mut alloc::vec::Vec<u8>) -> Result<usize> {
             self.inner.read_to_end(buf).map_err(Into::into)
         }
     };
@@ -206,7 +210,8 @@ macro_rules! read_to_string {
     (core2, $dir:ident) => {};
     (fatfs, $dir:ident) => {};
     ($mod: ident, $dir: ident) => {
-        fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
+        #[cfg(feature = "alloc")]
+        fn read_to_string(&mut self, buf: &mut alloc::string::String) -> Result<usize> {
             self.inner.read_to_string(buf).map_err(Into::into)
         }
     };
@@ -274,15 +279,24 @@ macro_rules! from_this {
 }
 
 macro_rules! into_error {
-    (core2, $error:ty, $self:ident) => {
+    (core2, $error:ty, $errorkind:ty, $self:ident) => {
         <$error>::new($self.kind().into(), "sadly, core2 does not allow propagating dynamic error data so here is a 'static string for you :)")
     };
-    ($mod:ident, $error:ty, $self:ident) => {
-        <$error>::new($self.kind().into(), $self.message.as_str())
+    ($mod:ident, $error:ty, $errorkind:ty, $self:ident) => {
+        {
+            #[cfg(feature = "alloc")]
+            {
+                <$error>::new($self.kind().into(), $self.message.as_str())
+            }
+            #[cfg(not(feature = "alloc"))]
+            {
+                <$error>::from(Into::<$errorkind>::into($self.kind()))
+            }
+        }
     };
 }
 macro_rules! compat_impl {
-    ($mod:ident, $feature:literal, $from:ident, $error:ty, $errorkind:ty, $read:path, $seek:path, $seekfrom:ty) => {
+    ($mod:ident, $feature:literal, $from:ident, $read_compat:ident, $error:ty, $errorkind:ty, $read:path, $seek:path, $seekfrom:ty) => {
         #[cfg(feature = $feature)]
         mod $mod {
             use crate::{BridgeRead, BridgeSeek, SeekFrom, Inner, IoCompat, Error, Result};
@@ -293,7 +307,7 @@ macro_rules! compat_impl {
             }
             impl Into<$error> for Error {
                 fn into(self) -> $error {
-                    into_error!($mod, $error, self)
+                    into_error!($mod, $error, $errorkind, self)
                 }
             }
 
@@ -321,20 +335,26 @@ macro_rules! compat_impl {
 
             impl_seek!($mod, $error, $seek, $seekfrom);
         }
-        pub use crate::$mod::FromThis as $from;
+        #[cfg(feature = $feature)]
+        from_mod!($mod, $from, $read_compat);
     };
 }
 
+macro_rules! from_mod {
+    ($mod:ident, $this: ident, $read_compat:ident) => {
+        pub use crate::$mod::{FromThis as $this, ReadCompat as $read_compat};
+    };
+}
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        compat_impl!(std, "std", FromStd, std::io::Error, std::io::ErrorKind, std::io::Read, std::io::Seek, std::io::SeekFrom);
-        pub use crate::std::FromThis as FromAcid;
-        pub use crate::std::FromThis as FromCore2;
-        pub use crate::std::FromThis as FromFatfs;
+        compat_impl!(std, "std", FromStd, StdReadCompat, std::io::Error, std::io::ErrorKind, std::io::Read, std::io::Seek, std::io::SeekFrom);
+        from_mod!(std, FromAcid, AcidReadCompat);
+        from_mod!(std, FromCore2, Core2ReadCompat);
+        from_mod!(std, FromFatfs, FatfsReadCompat);
     } else {
-        compat_impl!(acid_io, "acid_io", acid_io::Error, acid_io::Read, acid_io::Seek, acid_io::SeekFrom);
-        compat_impl!(core2, "core2", FromCore2, core2::io::Error, core2::io::Read, core2::io::Seek, core2::io::SeekFrom);
+        compat_impl!(acid_io, "acid_io", FromAcid, AcidReadCompat, acid_io::Error, acid_io::ErrorKind, acid_io::Read, acid_io::Seek, acid_io::SeekFrom);
+        compat_impl!(core2, "core2", FromCore2, CoreReadCompat, core2::io::Error, core2::io::ErrorKind, core2::io::Read, core2::io::Seek, core2::io::SeekFrom);
         #[cfg(feature = "fatfs")]
         mod fatfs {
             use crate::{BridgeRead, BridgeSeek, SeekFrom, Inner, IoCompat, Error, Result};
@@ -390,6 +410,7 @@ cfg_if::cfg_if! {
                 }
             }
         }
+        #[cfg(feature = "fatfs")]
         pub use crate::fatfs::FromThis as FromFatfs;
     }
 }

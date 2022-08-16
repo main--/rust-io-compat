@@ -17,8 +17,5 @@ fatfs = { git = "https://github.com/rafalh/rust-fatfs", version = "0.4.0", defau
 # TODO: alloc feature is currently broken
 default = ["std"]
 all = ["acid_io", "core2", "fatfs"]
-acid_io = ["dep:acid_io"]
-core2 = ["dep:core2"]
-fatfs = ["dep:fatfs"]
-alloc = ["acid_io/alloc", "core2/alloc", "fatfs/alloc"]
-std = ["alloc"]
+alloc = ["acid_io?/alloc", "core2?/alloc", "fatfs?/alloc"]
+std = ["alloc", "acid_io?/std", "core2?/std", "fatfs?/std"]
