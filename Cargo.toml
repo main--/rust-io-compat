@@ -3,8 +3,6 @@ name = "io-compat"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 acid_io = { version = "0.1.0", default-features = false, optional = true }
 cfg-if = "1.0.0"
@@ -14,7 +12,6 @@ fatfs = { git = "https://github.com/rafalh/rust-fatfs", version = "0.4.0", defau
 #core_io = { version = "0.1.20210325", default-features = false, optional = true }
 
 [features]
-# TODO: alloc feature is currently broken
 default = ["std"]
 all = ["acid_io", "core2", "fatfs"]
 alloc = ["acid_io?/alloc", "core2?/alloc", "fatfs?/alloc"]
