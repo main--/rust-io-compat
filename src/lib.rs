@@ -158,6 +158,47 @@ trait BridgeSeek {
     }
 }
 
+pub trait BridgeWrite {
+    fn write(&mut self, buf: &[u8]) -> Result<usize>;
+    fn flush(&mut self) -> Result<()>;
+    fn write_all(&mut self, buf: &[u8]) -> Result<()>;
+    fn write_fmt(&mut self, fmt: core::fmt::Arguments<'_>) -> Result<()> {
+        // impl copied from libstd
+        use core::fmt;
+        // Create a shim which translates a Write to a fmt::Write and saves
+        // off I/O errors. instead of discarding them
+        struct Adapter<'a, T: ?Sized + 'a> {
+            inner: &'a mut T,
+            error: Result<()>,
+        }
+
+        impl<T: BridgeWrite + ?Sized> fmt::Write for Adapter<'_, T> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                match self.inner.write_all(s.as_bytes()) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        self.error = Err(e);
+                        Err(fmt::Error)
+                    }
+                }
+            }
+        }
+
+        let mut output = Adapter { inner: self, error: Ok(()) };
+        match fmt::write(&mut output, fmt) {
+            Ok(()) => Ok(()),
+            Err(..) => {
+                // check if the error came from the underlying `Write` or not
+                if output.error.is_err() {
+                    output.error
+                } else {
+                    Err(Error::new(ErrorKind::Other, "formatting error"))
+                }
+            }
+        }
+    }
+}
+
 macro_rules! impl_seek {
     (core2, $error:ty, $seek:path, $seekfrom:ty) => {
         impl<T: $seek> BridgeSeek for FromThis<T> {
@@ -232,6 +273,29 @@ macro_rules! read_body {
     };
 }
 
+macro_rules! write_fmt {
+    (fatfs) => {};
+    ($mod: ident) => {
+        fn write_fmt(&mut self, fmt: core::fmt::Arguments<'_>) -> Result<()> {
+            self.inner.write_fmt(fmt).map_err(Into::into)
+        }
+    };
+}
+macro_rules! write_body {
+    ($mod: ident) => {
+        fn write(&mut self, buf: &[u8]) -> Result<usize> {
+            self.inner.write(buf).map_err(Into::into)
+        }
+        fn flush(&mut self) -> Result<()> {
+            self.inner.flush().map_err(Into::into)
+        }
+        fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+            self.inner.write_all(buf).map_err(Into::into)
+        }
+        write_fmt!($mod);
+    };
+}
+
 macro_rules! seek_from {
     ($seekfrom:ty) => {
         impl From<$seekfrom> for SeekFrom {
@@ -296,10 +360,10 @@ macro_rules! into_error {
     };
 }
 macro_rules! compat_impl {
-    ($mod:ident, $feature:literal, $from:ident, $read_compat:ident, $error:ty, $errorkind:ty, $read:path, $seek:path, $seekfrom:ty) => {
+    ($mod:ident, $feature:literal, $from:ident, $read_compat:ident, $error:ty, $errorkind:ty, $read:path, $seek:path, $seekfrom:ty, $write:path) => {
         #[cfg(feature = $feature)]
         mod $mod {
-            use crate::{BridgeRead, BridgeSeek, SeekFrom, Inner, IoCompat, Error, Result};
+            use crate::{BridgeRead, BridgeSeek, BridgeWrite, SeekFrom, Inner, IoCompat, Error, Result};
             impl From<$error> for Error {
                 fn from(e: $error) -> Self {
                     Error::new(e.kind().into(), e)
@@ -323,11 +387,17 @@ macro_rules! compat_impl {
             impl<T: $read> BridgeRead for FromThis<T> {
                 read_body!($mod, inner);
             }
-            mod read {
+            impl<T: $write> BridgeWrite for FromThis<T> {
+                write_body!($mod);
+            }
+            mod for_compat {
                 use super::*;
                 type Result<T> = core::result::Result<T, $error>;
                 impl<T: BridgeRead> $read for IoCompat<T> {
                     read_body!($mod, outer);
+                }
+                impl<T: BridgeWrite> $write for IoCompat<T> {
+                    write_body!($mod);
                 }
             }
 
@@ -348,16 +418,16 @@ macro_rules! from_mod {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        compat_impl!(std, "std", FromStd, StdReadCompat, std::io::Error, std::io::ErrorKind, std::io::Read, std::io::Seek, std::io::SeekFrom);
+        compat_impl!(std, "std", FromStd, StdReadCompat, std::io::Error, std::io::ErrorKind, std::io::Read, std::io::Seek, std::io::SeekFrom, std::io::Write);
         from_mod!(std, FromAcid, AcidReadCompat);
         from_mod!(std, FromCore2, Core2ReadCompat);
         from_mod!(std, FromFatfs, FatfsReadCompat);
     } else {
-        compat_impl!(acid_io, "acid_io", FromAcid, AcidReadCompat, acid_io::Error, acid_io::ErrorKind, acid_io::Read, acid_io::Seek, acid_io::SeekFrom);
-        compat_impl!(core2, "core2", FromCore2, CoreReadCompat, core2::io::Error, core2::io::ErrorKind, core2::io::Read, core2::io::Seek, core2::io::SeekFrom);
+        compat_impl!(acid_io, "acid_io", FromAcid, AcidReadCompat, acid_io::Error, acid_io::ErrorKind, acid_io::Read, acid_io::Seek, acid_io::SeekFrom, acid_io::Write);
+        compat_impl!(core2, "core2", FromCore2, CoreReadCompat, core2::io::Error, core2::io::ErrorKind, core2::io::Read, core2::io::Seek, core2::io::SeekFrom, core2::io::Write);
         #[cfg(feature = "fatfs")]
         mod fatfs {
-            use crate::{BridgeRead, BridgeSeek, SeekFrom, Inner, IoCompat, Error, Result};
+            use crate::{BridgeRead, BridgeSeek, BridgeWrite, SeekFrom, Inner, IoCompat, Error, Result};
 
             impl<T> fatfs::IoBase for IoCompat<T> {
                 type Error = crate::Error;
@@ -391,10 +461,17 @@ cfg_if::cfg_if! {
             impl<T: fatfs::Read<Error=fatfs::Error<Error>>> BridgeRead for FromThis<T> {
                 read_body!(fatfs, inner);
             }
-            mod read {
+            impl<T: fatfs::Write<Error=fatfs::Error<Error>>> BridgeWrite for FromThis<T> {
+                write_body!(fatfs);
+            }
+
+            mod for_compat {
                 use super::*;
                 impl<T: BridgeRead> fatfs::Read for IoCompat<T> {
                     read_body!(fatfs, outer);
+                }
+                impl<T: BridgeWrite> fatfs::Write for IoCompat<T> {
+                    write_body!(fatfs);
                 }
             }
 
